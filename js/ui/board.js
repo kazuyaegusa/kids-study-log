@@ -1,9 +1,15 @@
-import { monthDays, pokemonTileDates } from '../core.js';
+import { periodDays, pokemonTileDates } from '../core.js';
 import { create, button } from './dom.js';
 
 // The final row spans the full image, including 29-, 30- and 31-day months.
 // Tile IDs stay fixed; opaque areas take priority within the seeded order.
 export function tileGeometry(index, count) {
+  if (count === 7) {
+    const row = index < 2 ? 0 : index < 5 ? 1 : 2;
+    const span = row === 1 ? 2 : 3;
+    const position = index - (row === 0 ? 0 : row === 1 ? 2 : 5);
+    return { columns: 6, rows: 3, row, column: position * span, span };
+  }
   const rows = Math.ceil(count / 7);
   const row = Math.floor(index / 7);
   const remaining = count - (rows - 1) * 7;
@@ -13,7 +19,7 @@ export function tileGeometry(index, count) {
   const span = lastRow
     ? Math.floor((position + 1) * 7 / remaining) - column
     : 1;
-  return { rows, row, column, span };
+  return { columns: 7, rows, row, column, span };
 }
 
 export async function withCoverage(artwork) {
@@ -28,14 +34,14 @@ export async function withCoverage(artwork) {
     const context = canvas.getContext('2d', { willReadFrequently: true });
     context.drawImage(image, 0, 0, 280, 280);
     const pixels = context.getImageData(0, 0, 280, 280).data;
-    const count = monthDays(artwork.id).length;
+    const count = periodDays(artwork.id).length;
     const priority = [];
     for (let index = 0; index < count; index++) {
-      const { rows, row, column, span } = tileGeometry(index, count);
+      const { columns, rows, row, column, span } = tileGeometry(index, count);
       let opaque = 0;
       let total = 0;
       for (let y = Math.floor(row * 280 / rows); y < Math.floor((row + 1) * 280 / rows); y++) {
-        for (let x = column * 40; x < (column + span) * 40; x++) {
+        for (let x = Math.floor(column * 280 / columns); x < Math.floor((column + span) * 280 / columns); x++) {
           if (pixels[(y * 280 + x) * 4 + 3] > 32) opaque++;
           total++;
         }
@@ -52,19 +58,21 @@ export async function withCoverage(artwork) {
 }
 
 function paintTile(tile, url, geometry) {
-  const { rows, row, column, span } = geometry;
+  const { columns, rows, row, column, span } = geometry;
   tile.style.backgroundImage = `url("${url}"), var(--board-ground)`;
-  tile.style.backgroundSize = `${700 / span}% ${rows * 100}%`;
-  tile.style.backgroundPosition = `${span === 7 ? 0 : column * 100 / (7 - span)}% ${row * 100 / (rows - 1)}%`;
+  tile.style.backgroundSize = `${columns * 100 / span}% ${rows * 100}%`;
+  tile.style.backgroundPosition = `${span === columns ? 0 : column * 100 / (columns - span)}% ${rows === 1 ? 0 : row * 100 / (rows - 1)}%`;
 }
 
 export function fillMosaic(grid, month, entries, artwork, imageURL, options = {}) {
   const { thumbnail = false, onDay, revealIndex = -1 } = options;
-  const dates = monthDays(month);
+  const dates = periodDays(month);
   const pokemon = artwork?.artType === 'pokemon' && imageURL;
   const opened = pokemon ? pokemonTileDates(entries, month, artwork.pokemonId, artwork.priority) : null;
   grid.replaceChildren();
-  grid.style.gridTemplateRows = `repeat(${Math.ceil(dates.length / 7)}, minmax(0, 1fr))`;
+  const { columns, rows } = tileGeometry(0, dates.length);
+  grid.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
+  grid.style.gridTemplateRows = `repeat(${rows}, minmax(0, 1fr))`;
   for (let index = 0; index < dates.length; index++) {
     const date = pokemon ? opened.get(index) : dates[index];
     const dayEntries = date ? entries.filter(entry => entry.date === date) : [];
