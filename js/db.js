@@ -1,8 +1,8 @@
-import { DEFAULT_CATEGORIES, FORMAT_VERSION, validateBackup } from './core.js';
+import { DEFAULT_CATEGORIES, FORMAT_VERSION, validateBackup, replaceDayEntries } from './core.js';
 
 const DB_NAME = 'mainichi-kiroku';
-const DB_VERSION = 2;
-const STORES = ['entries', 'months', 'categories', 'settings', 'replies'];
+const DB_VERSION = 3;
+const STORES = ['entries', 'months', 'weeks', 'categories', 'settings', 'replies'];
 
 export function openDatabase() {
   return new Promise((resolve, reject) => {
@@ -11,7 +11,10 @@ export function openDatabase() {
       const db = request.result;
       for (const name of STORES) if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: name === 'settings' ? 'key' : 'id' });
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      request.result.onversionchange = () => request.result.close();
+      resolve(request.result);
+    };
     request.onerror = () => reject(request.error);
   });
 }
@@ -22,26 +25,44 @@ const transactionDone = tx => new Promise((resolve, reject) => { tx.oncomplete =
 export async function all(db, store) { return requestResult(db.transaction(store).objectStore(store).getAll()); }
 export async function get(db, store, key) { return requestResult(db.transaction(store).objectStore(store).get(key)); }
 export async function put(db, store, value) { const tx = db.transaction(store, 'readwrite'); tx.objectStore(store).put(value); await transactionDone(tx); }
-export async function addEntries(db, entries) {
-  const tx = db.transaction('entries', 'readwrite');
-  const done = transactionDone(tx);
-  try {
+export function saveDayEntries(db, date, entries) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['entries', 'replies'], 'readwrite');
     const store = tx.objectStore('entries');
-    for (const entry of entries) store.add(entry);
-  } catch (error) {
-    tx.abort();
-    await done.catch(() => {});
-    throw error;
-  }
-  await done;
+    let result;
+    let failure;
+    const request = store.getAll();
+    request.onsuccess = () => {
+      try {
+        const previous = request.result;
+        const replacement = replaceDayEntries(previous, date, entries);
+        const retained = new Set(previous.filter(entry => entry.date === date).map(entry => entry.id));
+        for (const id of replacement.deletedIds) {
+          store.delete(id);
+          tx.objectStore('replies').delete(id);
+        }
+        for (const entry of replacement.entries) {
+          if (retained.has(entry.id)) store.put(entry);
+          else store.add(entry);
+        }
+        result = { ...replacement, previous,
+          afterEntries: [...previous.filter(entry => entry.date !== date), ...replacement.entries] };
+      } catch (error) {
+        failure = error;
+        tx.abort();
+      }
+    };
+    tx.oncomplete = () => resolve(result);
+    tx.onerror = tx.onabort = () => reject(failure ?? tx.error ?? new Error('保存できませんでした'));
+  });
 }
 export async function removeEntry(db, id) { const tx = db.transaction(['entries', 'replies'], 'readwrite'); tx.objectStore('entries').delete(id); tx.objectStore('replies').delete(id); await transactionDone(tx); }
 export async function remove(db, store, key) { const tx = db.transaction(store, 'readwrite'); tx.objectStore(store).delete(key); await transactionDone(tx); }
 
-export function choosePokemonMonth(db, value) {
+export function choosePokemonWeek(db, value) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction('months', 'readwrite');
-    const store = tx.objectStore('months');
+    const tx = db.transaction('weeks', 'readwrite');
+    const store = tx.objectStore('weeks');
     let saved = false;
     const request = store.get(value.id);
     request.onsuccess = () => {
@@ -51,7 +72,7 @@ export function choosePokemonMonth(db, value) {
     };
     tx.oncomplete = () => resolve(saved);
     tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error ?? new Error('月の絵を保存できませんでした'));
+    tx.onabort = () => reject(tx.error ?? new Error('週の相棒を保存できませんでした'));
   });
 }
 
@@ -91,7 +112,9 @@ export async function exportBackup(db) {
   const rows = await Promise.all(STORES.map(name => requestResult(tx.objectStore(name).getAll())));
   STORES.forEach((name, index) => { result[name] = rows[index]; });
   result.entries = await Promise.all(result.entries.map(async entry => ({ ...entry, photo: entry.photo ? await blobToDataURL(entry.photo) : null })));
-  result.months = await Promise.all(result.months.map(async month => ({ ...month, artwork: month.artwork ? await blobToDataURL(month.artwork) : null })));
+  for (const name of ['months', 'weeks']) {
+    result[name] = await Promise.all(result[name].map(async art => ({ ...art, artwork: art.artwork ? await blobToDataURL(art.artwork) : null })));
+  }
   return result;
 }
 
@@ -99,8 +122,9 @@ export async function importBackup(db, raw) {
   const data = validateBackup(raw);
   const entries = data.entries.map(entry => ({ ...entry, photo: entry.photo ? dataURLToBlob(entry.photo) : null }));
   const months = data.months.map(month => ({ ...month, artwork: month.artwork ? dataURLToBlob(month.artwork) : null }));
+  const weeks = data.weeks.map(week => ({ ...week, artwork: dataURLToBlob(week.artwork) }));
   const tx = db.transaction(STORES, 'readwrite');
   for (const name of STORES) tx.objectStore(name).clear();
-  for (const name of STORES) for (const row of name === 'entries' ? entries : name === 'months' ? months : data[name]) tx.objectStore(name).put(row);
+  for (const name of STORES) for (const row of name === 'entries' ? entries : name === 'months' ? months : name === 'weeks' ? weeks : data[name]) tx.objectStore(name).put(row);
   await transactionDone(tx);
 }

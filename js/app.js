@@ -1,10 +1,10 @@
 import {
-  localDateKey, yesterdayKey, monthKey, monthDays, summarizeMonth,
+  localDateKey, yesterdayKey, weekKey, weekDays, periodDays, periodLabel, summarizePeriod,
   pokemonTileDates, totalExp, levelInfo, validateBackup,
   MAX_BACKUP_BYTES, streakInfo, badgeStatus, completedPokemon, DEFAULT_ADVENTURE_SETTINGS
 } from './core.js';
 import {
-  openDatabase, all, get, put, addEntries, choosePokemonMonth, removeEntry,
+  openDatabase, all, get, put, saveDayEntries, choosePokemonWeek, removeEntry,
   seedCategories, exportBackup, importBackup
 } from './db.js';
 import { shrinkImage, objectURL } from './images.js';
@@ -39,6 +39,12 @@ let view = 'home';
 let selectedDate = localDateKey();
 const selectedRows = new Map();
 let savingEntry = false;
+let loadingRecord = false;
+let recordRequest = 0;
+let savedPhoto = null;
+let recordPhotoURL = '';
+let sharedRowId = null;
+let legacyPhotoURLs = [];
 let parentOpen = false;
 let changingPin = false;
 let revealIndex = -1;
@@ -160,82 +166,194 @@ function closeRecord() {
 }
 
 async function renderRecordChoices() {
-  const dateBox = $('#date-options');
-  dateBox.replaceChildren();
-  for (const [date, label] of [[localDateKey(), '今日'], [yesterdayKey(), '昨日']]) {
-    const choice = button(`${label}・${Number(date.slice(-2))}日`,
-      `choice-button${selectedDate === date ? ' selected' : ''}`, () => {
-        selectedDate = date;
-        $('#record-title').textContent = `${label}の記録`;
-        renderRecordChoices();
-      });
-    choice.setAttribute('aria-pressed', String(selectedDate === date));
-    dateBox.append(choice);
-  }
+  const request = ++recordRequest;
+  const date = selectedDate;
+  loadingRecord = true;
+  $('#record-form').inert = true;
+  updateSaveState();
+  try {
+    const [stored, categoryRows, colorSetting] = await Promise.all([
+      all(db, 'entries'), all(db, 'categories'), get(db, 'settings', 'categoryColors')
+    ]);
+    if (request !== recordRequest) return;
+    const existing = stored.filter(entry => entry.date === date)
+      .sort((a, b) => Number(Boolean(b.selfStarted || b.comment || b.question || b.photo)) -
+        Number(Boolean(a.selfStarted || a.comment || a.question || a.photo)) ||
+        a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    $('#record-form').reset();
+    selectedRows.clear();
+    for (const entry of existing) selectedRows.set(entry.id, { ...entry });
+    sharedRowId = selectedRows.keys().next().value ?? null;
+    loadSharedFields();
+    $('#record-title').textContent = existing.length ? '記録の修正' : `${date === localDateKey() ? '今日' : '昨日'}の記録`;
+    $('#save-entry').textContent = existing.length ? '記録を修正する' : '記録を保存する　✦';
+    const dateBox = $('#date-options');
+    dateBox.replaceChildren();
+    for (const [date, label] of [[localDateKey(), '今日'], [yesterdayKey(), '昨日']]) {
+      const choice = button(`${label}・${Number(date.slice(-2))}日`,
+        `choice-button${selectedDate === date ? ' selected' : ''}`, () => {
+          selectedDate = date;
+          $('#record-title').textContent = `${label}の記録`;
+          renderRecordChoices();
+        });
+      choice.setAttribute('aria-pressed', String(selectedDate === date));
+      dateBox.append(choice);
+    }
 
-  const allCategories = orderedCategories(await all(db, 'categories'));
-  const colors = (await get(db, 'settings', 'categoryColors'))?.value ?? {};
-  const categories = allCategories.filter(row => row.visible);
-  for (const id of selectedRows.keys()) {
-    if (!categories.some(row => row.id === id)) selectedRows.delete(id);
+    const colors = colorSetting?.value ?? {};
+    const categories = orderedCategories(categoryRows).filter(row => row.visible || [...selectedRows.values()].some(entry => entry.categoryId === row.id));
+    const categoryBox = $('#category-options');
+    categoryBox.replaceChildren();
+    categories.forEach(category => {
+      const choice = button('',
+        'choice-button category-choice', () => {
+          captureSharedFields();
+          const selected = [...selectedRows].filter(([, entry]) => entry.categoryId === category.id);
+          if (selected.length) selected.forEach(([key]) => selectedRows.delete(key));
+          else selectedRows.set(`new-${category.id}`, {
+            categoryId: category.id, minutes: 20,
+            ...(!selectedRows.size ? {
+              selfStarted: $('#self-started').checked, comment: $('#entry-comment').value,
+              question: $('#entry-question').value, photo: savedPhoto, photoFile: $('#entry-photo').files[0]
+            } : {})
+          });
+          renderRecordRows(categories);
+        });
+      const color = Object.hasOwn(categoryOrder, category.id)
+        ? categoryOrder[category.id] : colors[category.id] ?? 4;
+      choice.dataset.color = String(color);
+      choice.dataset.categoryId = category.id;
+      const icon = create('span', '', category.icon);
+      icon.setAttribute('aria-hidden', 'true');
+      choice.setAttribute('aria-label', category.name);
+      choice.append(icon, document.createTextNode(category.name));
+      categoryBox.append(choice);
+    });
+
+    renderRecordRows(categories);
+  } catch (error) {
+    if (request === recordRequest) {
+      selectedRows.clear();
+      notify(`記録を読み込めませんでした: ${error.message}`);
+    }
+  } finally {
+    if (request === recordRequest) {
+      loadingRecord = false;
+      $('#record-form').inert = savingEntry;
+      updateSaveState();
+    }
   }
-  const categoryBox = $('#category-options');
-  categoryBox.replaceChildren();
-  categories.forEach(category => {
-    const choice = button('',
-      'choice-button category-choice', () => {
-        if (selectedRows.has(category.id)) selectedRows.delete(category.id);
-        else selectedRows.set(category.id, 20);
-        renderRecordRows(categories);
-      });
-    const color = Object.hasOwn(categoryOrder, category.id)
-      ? categoryOrder[category.id] : colors[category.id] ?? 4;
-    choice.dataset.color = String(color);
-    choice.dataset.categoryId = category.id;
-    const icon = create('span', '', category.icon);
-    icon.setAttribute('aria-hidden', 'true');
-    choice.setAttribute('aria-label', category.name);
-    choice.append(icon, document.createTextNode(category.name));
-    categoryBox.append(choice);
+}
+
+function captureSharedFields() {
+  const entry = selectedRows.get(sharedRowId);
+  if (!entry) return;
+  Object.assign(entry, {
+    selfStarted: $('#self-started').checked, comment: $('#entry-comment').value,
+    question: $('#entry-question').value, photo: savedPhoto,
+    photoFile: $('#entry-photo').files[0] ?? entry.photoFile ?? null
   });
+}
 
-  renderRecordRows(categories);
+function loadSharedFields() {
+  const entry = selectedRows.get(sharedRowId);
+  $('#self-started').checked = Boolean(entry?.selfStarted);
+  $('#entry-comment').value = entry?.comment ?? '';
+  $('#entry-question').value = entry?.question ?? '';
+  $('#entry-photo').value = '';
+  savedPhoto = entry?.photo ?? null;
+  if (recordPhotoURL) URL.revokeObjectURL(recordPhotoURL);
+  recordPhotoURL = savedPhoto ? URL.createObjectURL(savedPhoto) : '';
+  const preview = $('#record-photo-preview');
+  preview.hidden = !savedPhoto || Boolean(entry?.photoFile);
+  if (recordPhotoURL) preview.src = recordPhotoURL;
+  else preview.removeAttribute('src');
+  $('#photo-name').textContent = entry?.photoFile?.name ?? '';
+  $('.more-fields').open = Boolean(savedPhoto || entry?.comment || entry?.question);
+}
+
+function legacyEntryFields(entry) {
+  const box = create('div', 'optional-fields');
+  const selfLabel = create('label', 'self-toggle');
+  const self = create('input');
+  self.type = 'checkbox';
+  self.checked = Boolean(entry.selfStarted);
+  self.addEventListener('change', () => { entry.selfStarted = self.checked; });
+  selfLabel.append(self, document.createTextNode('自分からやった！'));
+  box.append(selfLabel);
+  for (const [key, title, limit] of [['comment', '一言', 500], ['question', '疑問', 300]]) {
+    const label = create('label', '', title);
+    const input = create(key === 'comment' ? 'textarea' : 'input');
+    input.value = entry[key] ?? '';
+    input.maxLength = limit;
+    input.id = `legacy-${key}-${[...selectedRows.values()].indexOf(entry)}`;
+    label.htmlFor = input.id;
+    input.addEventListener('input', () => { entry[key] = input.value; });
+    box.append(label, input);
+  }
+  const preview = create('img', 'entry-photo');
+  preview.alt = '保存済みの学習写真';
+  if (entry.photo) preview.src = objectURL(entry.photo, legacyPhotoURLs);
+  preview.hidden = !entry.photo || Boolean(entry.photoFile);
+  const upload = create('label', 'upload-label', '📷 写真を選ぶ');
+  const file = create('input');
+  file.type = 'file';
+  file.accept = 'image/*';
+  const name = create('span', '', entry.photoFile?.name ?? '');
+  file.addEventListener('change', () => {
+    entry.photoFile = file.files[0] ?? null;
+    name.textContent = entry.photoFile?.name ?? '';
+    preview.hidden = Boolean(entry.photoFile) || !entry.photo;
+  });
+  upload.append(file);
+  box.append(upload, name, preview);
+  return box;
 }
 
 function updateSaveState() {
   const empty = selectedRows.size === 0;
-  $('#save-entry').disabled = savingEntry || empty;
+  $('#save-entry').disabled = savingEntry || loadingRecord || empty;
   $('#record-empty').hidden = !empty;
 }
 
 function renderRecordRows(categories) {
+  captureSharedFields();
+  if (!selectedRows.has(sharedRowId)) {
+    sharedRowId = selectedRows.keys().next().value ?? null;
+    loadSharedFields();
+  }
+  legacyPhotoURLs.forEach(URL.revokeObjectURL);
+  legacyPhotoURLs = [];
   const tiles = [...$('#category-options').querySelectorAll('button')];
   tiles.forEach(tile => {
-    const selected = selectedRows.has(tile.dataset.categoryId);
+    const selected = [...selectedRows.values()].some(entry => entry.categoryId === tile.dataset.categoryId);
     tile.classList.toggle('selected', selected);
     tile.setAttribute('aria-pressed', String(selected));
   });
   const rows = $('#record-rows');
   rows.replaceChildren();
-  for (const [categoryId, selectedMinutes] of selectedRows) {
+  for (const [rowId, entry] of selectedRows) {
+    const { categoryId, minutes: selectedMinutes } = entry;
     const category = categories.find(row => row.id === categoryId);
     const row = create('fieldset', 'record-row');
     row.dataset.categoryId = categoryId;
+    row.dataset.entryId = rowId;
     row.setAttribute('aria-label', category.name);
     const legend = create('legend');
     legend.append(create('span', '', `${category.icon} ${category.name}`));
     const remove = button('×', 'icon-button remove-record-row', () => {
-      selectedRows.delete(categoryId);
+      captureSharedFields();
+      selectedRows.delete(rowId);
       renderRecordRows(categories);
       tiles.find(tile => tile.dataset.categoryId === categoryId)?.focus();
     });
     remove.setAttribute('aria-label', `${category.name}を外す`);
     const timeBox = create('div', 'choice-row');
-    for (const minutes of [10, 20, 30, 45, 60]) {
+    for (const minutes of [...new Set([10, 20, 30, 45, 60, selectedMinutes])].sort((a, b) => a - b)) {
       const label = minutes === 60 ? '60分以上' : `${minutes}分`;
       const choice = button(label,
         `choice-button${selectedMinutes === minutes ? ' selected' : ''}`, () => {
-          selectedRows.set(categoryId, minutes);
+          entry.minutes = minutes;
           timeBox.querySelectorAll('button').forEach(chip => {
             const selected = chip === choice;
             chip.classList.toggle('selected', selected);
@@ -247,17 +365,17 @@ function renderRecordRows(categories) {
     }
     legend.append(remove);
     row.append(legend, timeBox);
+    if (rowId !== sharedRowId && (entry.selfStarted || entry.comment || entry.question || entry.photo || entry.photoFile)) {
+      row.append(legacyEntryFields(entry));
+    }
     rows.append(row);
   }
   updateSaveState();
 }
 
-function weekDates() {
-  const today = new Date();
-  const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (today.getDay() + 6) % 7);
-  return Array.from({ length: 7 }, (_, index) =>
-    localDateKey(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + index))
-  );
+async function allPartners() {
+  const [months, weeks] = await Promise.all([all(db, 'months'), all(db, 'weeks')]);
+  return [...months, ...weeks];
 }
 
 function renderPlayer(entries, nickname) {
@@ -272,7 +390,7 @@ function renderPlayer(entries, nickname) {
   const days = ['月', '火', '水', '木', '金', '土', '日'];
   const dots = $('#week-dots');
   dots.replaceChildren();
-  weekDates().forEach((date, index) => {
+  weekDays(weekKey()).forEach((date, index) => {
     const day = create('div', `week-day${recorded.has(date) ? ' recorded' : ''}`);
     day.append(document.createTextNode(days[index]), create('span', '', '🔥'));
     day.setAttribute('aria-label', `${days[index]}曜日・${recorded.has(date) ? '記録あり' : '記録なし'}`);
@@ -283,21 +401,23 @@ function renderPlayer(entries, nickname) {
 async function renderHome() {
   const request = ++homeRenderRequest;
   const today = localDateKey();
-  const month = monthKey(today);
+  const month = weekKey(today);
   const [entries, storedArtwork, nickname, months, settings] = await Promise.all([
-    all(db, 'entries'), get(db, 'months', month), get(db, 'settings', 'nickname'),
-    all(db, 'months'), readAdventureSettings()
+    all(db, 'entries'), get(db, 'weeks', month), get(db, 'settings', 'nickname'),
+    allPartners(), readAdventureSettings()
   ]);
   const artwork = await withCoverage(storedArtwork);
   if (view !== 'home' || request !== homeRenderRequest) return;
   if (today !== localDateKey()) return renderHome();
   clearImageURLs();
   renderCompanion(entries, artwork, months, settings, imageURLs);
+  $('#open-record-label').textContent = entries.some(entry => entry.date === today)
+    ? '今日の記録を修正する' : '今日の記録をつける';
   renderPlayer(entries, typeof nickname?.value?.name === 'string' ? nickname.value.name : 'トレーナー');
   await updateBadge();
   if (view !== 'home' || request !== homeRenderRequest) return;
   renderedHomeDate = today;
-  $('#month-label').textContent = `${Number(month.slice(5))}月`;
+  $('#month-label').textContent = periodLabel(month);
   const chosen = artwork?.artType === 'pokemon';
   $('#selection-panel').hidden = Boolean(chosen);
   $('#board-panel').hidden = !chosen;
@@ -313,11 +433,11 @@ async function renderHome() {
   board.style.setProperty('--pokemon-image', imageURL ? `url("${imageURL}")` : 'none');
   fillMosaic($('#month-grid'), month, entries, artwork, imageURL, { onDay: showDay, revealIndex });
   revealIndex = -1;
-  const opened = summarizeMonth(entries, month).activeDays;
-  const total = monthDays(month).length;
+  const opened = summarizePeriod(entries, month).activeDays;
+  const total = periodDays(month).length;
   $('#month-progress').textContent = `${opened} / ${total} マス`;
   $('#pokemon-name').textContent = artwork.artType === 'pokemon' && opened === total
-    ? artwork.pokemonName : artwork.artType === 'pokemon' ? '？？？' : '今月の絵';
+    ? artwork.pokemonName : artwork.artType === 'pokemon' ? '？？？' : '今週の絵';
 }
 
 async function renderCandidates(month) {
@@ -343,8 +463,8 @@ async function renderCandidates(month) {
 }
 
 async function loadCandidates(month, force = false) {
-  const existing = await get(db, 'months', month);
-  if (month !== monthKey(localDateKey()) || existing?.artType === 'pokemon') return;
+  const existing = await get(db, 'weeks', month);
+  if (month !== weekKey(localDateKey()) || existing?.artType === 'pokemon') return;
   if (!force && candidates.month === month && candidates.items.length === 6) {
     renderCandidates(month);
     return;
@@ -371,7 +491,7 @@ async function loadCandidates(month, force = false) {
       if (blob.type !== 'image/png' || !blob.size) throw new Error('画像の形式が正しくありません');
       return { id, blob };
     }));
-    if (request !== candidateRequest || view !== 'home' || month !== monthKey(localDateKey())) return;
+    if (request !== candidateRequest || view !== 'home' || month !== weekKey(localDateKey())) return;
     candidates = { month, items };
     renderCandidates(month);
   } catch (error) {
@@ -386,14 +506,14 @@ async function loadCandidates(month, force = false) {
 }
 
 async function choosePokemon(month, item) {
-  const existing = await get(db, 'months', month);
-  if (choosingPokemon || month !== monthKey(localDateKey()) ||
+  const existing = await get(db, 'weeks', month);
+  if (choosingPokemon || month !== weekKey(localDateKey()) ||
       existing?.artType === 'pokemon') { await renderHome(); return; }
   choosingPokemon = true;
   try {
-    if (!await customConfirm('今月の相棒を決める？', '決めた後は変更できません。', 'この影に決める')) return;
-    const current = await get(db, 'months', month);
-    if (month !== monthKey(localDateKey()) || current?.artType === 'pokemon') { await renderHome(); return; }
+    if (!await customConfirm('今週の相棒を決める？', '決めた後は変更できません。', 'この影に決める')) return;
+    const current = await get(db, 'weeks', month);
+    if (month !== weekKey(localDateKey()) || current?.artType === 'pokemon') { await renderHome(); return; }
     $('#candidate-message').textContent = '名前を取得しています…';
     const response = await fetch(`https://pokeapi.co/api/v2/pokemon-species/${item.id}`, { signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw new Error('名前を取得できませんでした');
@@ -403,18 +523,18 @@ async function choosePokemon(month, item) {
     if (typeof name !== 'string' || !name.trim() || name.length > 80) {
       throw new Error('日本語名を確認できませんでした');
     }
-    if (month !== monthKey(localDateKey())) {
+    if (month !== weekKey(localDateKey())) {
       await renderHome();
-      return notify('月が変わりました。今月の相棒を選んでください');
+      return notify('週が変わりました。今週の相棒を選んでください');
     }
-    const saved = await choosePokemonMonth(db, {
+    const saved = await choosePokemonWeek(db, {
       id: month, artType: 'pokemon', pokemonId: item.id,
       pokemonName: name.trim(), artwork: item.blob
     });
-    if (!saved) { await renderHome(); return notify('今月の相棒はすでに決まっています'); }
+    if (!saved) { await renderHome(); return notify('今週の相棒はすでに決まっています'); }
     candidates = { month: '', items: [] };
     await renderHome();
-    notify('今月の相棒が決まりました！');
+    notify('今週の相棒が決まりました！');
   } catch (error) {
     const message = error instanceof TypeError ? '通信できませんでした' : error.message;
     $('#candidate-message').textContent = `${message}。もう一度選んでください。`;
@@ -426,36 +546,33 @@ async function choosePokemon(month, item) {
 
 async function saveEntry(event) {
   event.preventDefault();
-  if (savingEntry || selectedRows.size === 0) return;
+  if (savingEntry || loadingRecord || selectedRows.size === 0) return;
   savingEntry = true;
   updateSaveState();
   $('#record-form').inert = true;
   const date = selectedDate;
-  const rows = [...selectedRows];
-  const shared = {
-    selfStarted: $('#self-started').checked,
-    comment: $('#entry-comment').value.trim(),
-    question: $('#entry-question').value.trim()
-  };
-  const photoFile = $('#entry-photo').files[0];
+  captureSharedFields();
+  const rows = [...selectedRows.values()].map(entry => ({ ...entry }));
   try {
-    const [previous, months] = await Promise.all([all(db, 'entries'), all(db, 'months')]);
+    const months = await allPartners();
+
     if (![localDateKey(), yesterdayKey()].includes(date)) {
       throw new Error('日付が変わりました。今日か昨日を選び直してください');
     }
-    const photo = photoFile ? await shrinkImage(photoFile) : null;
-    const entries = rows.map(([categoryId, minutes], index) => ({
-      id: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      date, categoryId, minutes,
-      selfStarted: index === 0 && shared.selfStarted,
-      comment: index === 0 ? shared.comment : '',
-      question: index === 0 ? shared.question : '',
-      photo: index === 0 ? photo : null, createdAt: Date.now()
-    }));
-    const newTile = !previous.some(row => row.date === date);
+    const entries = await Promise.all(rows.map(async row => ({
+      id: row.id ?? crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      date, categoryId: row.categoryId, minutes: row.minutes,
+      selfStarted: Boolean(row.selfStarted), comment: row.comment?.trim() ?? '',
+      question: row.question?.trim() ?? '',
+      photo: row.photoFile ? await shrinkImage(row.photoFile) : row.photo ?? null,
+      createdAt: row.createdAt ?? Date.now()
+    })));
+    if (![localDateKey(), yesterdayKey()].includes(date)) {
+      throw new Error('日付が変わりました。今日か昨日を選び直してください');
+    }
+    const { previous, afterEntries, editing } = await saveDayEntries(db, date, entries);
+    const newTile = !editing;
     const before = levelInfo(totalExp(previous));
-    await addEntries(db, entries);
-    const afterEntries = [...previous, ...entries];
     const after = levelInfo(totalExp(afterEntries));
     $('#record-form').reset();
     selectedRows.clear();
@@ -463,8 +580,14 @@ async function saveEntry(event) {
     $('.more-fields').open = false;
     $('#photo-name').textContent = '';
     closeRecord();
-    const entryMonth = monthKey(date);
-    const artwork = await withCoverage(await get(db, 'months', entryMonth));
+    if (editing) {
+      revealIndex = -1;
+      await renderHome();
+      notify('記録を修正しました');
+      return;
+    }
+    const entryMonth = weekKey(date);
+    const artwork = await withCoverage(await get(db, 'weeks', entryMonth));
     const hasBoard = artwork?.artType === 'pokemon';
     if (hasBoard && newTile) {
       const oldTiles = pokemonTileDates(previous, entryMonth, artwork.pokemonId, artwork.priority);
@@ -475,7 +598,7 @@ async function saveEntry(event) {
     await renderHome();
     revealIndex = -1;
     let board = hasBoard ? $('#month-art') : null;
-    if (hasBoard && entryMonth !== monthKey(localDateKey())) {
+    if (hasBoard && entryMonth !== weekKey(localDateKey())) {
       board = create('div', 'art-board');
       const imageURL = artwork.artwork ? objectURL(artwork.artwork, imageURLs) : '';
       board.classList.toggle('pokemon-board', artwork.artType === 'pokemon');
@@ -488,7 +611,7 @@ async function saveEntry(event) {
       });
     }
     const complete = newTile && artwork?.artType === 'pokemon' &&
-      summarizeMonth(afterEntries, entryMonth).activeDays === monthDays(entryMonth).length;
+      summarizePeriod(afterEntries, entryMonth).activeDays === periodDays(entryMonth).length;
     const beforeBadges = new Set(badgeStatus(previous, months).filter(badge => badge.earned).map(badge => badge.id));
     const newBadges = badgeStatus(afterEntries, months).filter(badge => badge.earned && !beforeBadges.has(badge.id));
     const today = localDateKey();
@@ -624,30 +747,37 @@ async function updateBadge() {
 }
 
 async function renderAlbum() {
-  const [entries, months] = await Promise.all([all(db, 'entries'), all(db, 'months')]);
+  const [entries, storedPartners] = await Promise.all([all(db, 'entries'), allPartners()]);
+  const months = await Promise.all(storedPartners.map(withCoverage));
   if (view !== 'album') return;
   clearImageURLs();
-  const current = monthKey(localDateKey());
+  const current = weekKey(localDateKey());
   const keys = [...new Set([
-    ...entries.map(entry => monthKey(entry.date)), ...months.map(row => row.id)
+    ...entries.map(entry => weekKey(entry.date)), ...months.map(row => row.id)
   ])].filter(key => key <= current).sort().reverse();
   const caught = completedPokemon(entries, months);
   $('#collection-count').textContent = `図鑑 ${new Set(caught.map(month => month.pokemonId)).size} / 1025`;
   const list = $('#album-list');
   list.replaceChildren();
-  if (!keys.length) list.append(create('p', 'empty-note', '今月の相棒を選ぶと、ここに並ぶよ。'));
+  if (!keys.length) list.append(create('p', 'empty-note', '今週の相棒を選ぶと、ここに並ぶよ。'));
   for (const key of keys) {
     const artwork = months.find(row => row.id === key);
-    const summary = summarizeMonth(entries, key);
+    const summary = summarizePeriod(entries, key);
     const card = create('article', 'album-card');
     const preview = create('div', 'album-preview');
     preview.setAttribute('aria-hidden', 'true');
     const imageURL = artwork?.artwork ? objectURL(artwork.artwork, imageURLs) : '';
     const completed = artwork?.artType === 'pokemon' &&
-      summary.activeDays === monthDays(key).length;
+      summary.activeDays === periodDays(key).length;
     if (artwork?.artType === 'pokemon') {
-      preview.classList.add('dex-preview');
-      preview.append(pokemonPortrait(artwork, imageURL, completed));
+      if (completed) {
+        preview.classList.add('dex-preview');
+        preview.append(pokemonPortrait(artwork, imageURL, true));
+      } else {
+        preview.classList.add('pokemon-board');
+        preview.style.setProperty('--pokemon-image', `url("${imageURL}")`);
+        fillMosaic(preview, key, entries, artwork, imageURL, { thumbnail: true });
+      }
       card.append(create('span', 'dex-number', `No.${String(artwork.pokemonId).padStart(3, '0')}`));
     } else {
       if (imageURL) preview.style.backgroundImage = `url("${imageURL}")`;
@@ -657,10 +787,10 @@ async function renderAlbum() {
     }
     const name = completed ? artwork.pokemonName : artwork?.artType === 'pokemon' ? '？？？' : imageURL ? '月の絵' : '未選択';
     card.append(preview, create('h4', 'dex-name', name),
-      create('p', '', `${Number(key.slice(0, 4))}年${Number(key.slice(5))}月 · ${summary.activeDays} / ${monthDays(key).length} マス`));
+      create('p', '', `${key.length === 10 ? `${Number(key.slice(0, 4))}年` : ""}${periodLabel(key)} · ${summary.activeDays} / ${periodDays(key).length} マス`));
     const track = create('div', 'exp-track dex-progress');
     const fill = create('span');
-    fill.style.width = `${100 * summary.activeDays / monthDays(key).length}%`;
+    fill.style.width = `${100 * summary.activeDays / periodDays(key).length}%`;
     track.append(fill);
     card.append(track, button('記録を見る', 'secondary-button', () => showPastMonth(key, artwork, entries, imageURL)));
     if (completed) {
@@ -708,14 +838,14 @@ async function showPastMonth(month, artwork, entries, imageURL) {
   board.style.setProperty('--pokemon-image', imageURL ? `url("${imageURL}")` : 'none');
   fillMosaic(grid, month, entries, artwork, imageURL, { onDay: showDay });
   board.append(grid);
-  const summary = summarizeMonth(entries, month);
+  const summary = summarizePeriod(entries, month);
   const completed = artwork?.artType === 'pokemon' &&
-    summary.activeDays === monthDays(month).length;
+    summary.activeDays === periodDays(month).length;
   content.replaceChildren(
-    create('h2', '', `${Number(month.slice(0, 4))}年${Number(month.slice(5))}月`),
+    create('h2', '', `${month.length === 10 ? `${Number(month.slice(0, 4))}年` : ""}${periodLabel(month)}`),
     board,
     create('p', '', completed ? `完成！ ${artwork.pokemonName}` :
-      `${summary.activeDays} / ${monthDays(month).length} マス`)
+      `${summary.activeDays} / ${periodDays(month).length} マス`)
   );
   content.querySelector('h2').id = 'detail-title';
   $('#detail-dialog').showModal();
@@ -853,7 +983,7 @@ async function loadBackup(file) {
     if (file.size > MAX_BACKUP_BYTES) throw new Error('ファイルが大きすぎます');
     const data = validateBackup(JSON.parse(await file.text()));
     if (!await customConfirm('バックアップを読み込みますか？',
-      `現在のデータを置き換えます。記録${data.entries.length}件、月の絵${data.months.length}件です。`,
+      `現在のデータを置き換えます。記録${data.entries.length}件、週の相棒${data.weeks.length}件、月の絵${data.months.length}件です。`,
       '置き換える')) return;
     await importBackup(db, data);
     await prepareCategoryColors();
@@ -893,8 +1023,11 @@ async function init() {
     $('#record-form').addEventListener('submit', saveEntry);
     $('#entry-photo').addEventListener('change', event => {
       $('#photo-name').textContent = event.target.files[0]?.name ?? '';
+      $('#record-photo-preview').hidden = Boolean(event.target.files[0]) || !savedPhoto;
+      const entry = selectedRows.get(sharedRowId);
+      if (entry) entry.photoFile = event.target.files[0] ?? null;
     });
-    $('#refresh-candidates').addEventListener('click', () => loadCandidates(monthKey(localDateKey()), true));
+    $('#refresh-candidates').addEventListener('click', () => loadCandidates(weekKey(localDateKey()), true));
     $('#reply-button').addEventListener('click', showReplies);
     initEffects();
     $('#adventure-form').addEventListener('submit', async event => {
@@ -906,7 +1039,7 @@ async function init() {
     });
     $('#reset-avatar').addEventListener('click', async () => {
       await saveAdventureSettings({ avatarMonth: null });
-      notify('今月の相棒をアバターにしました');
+      notify('今週の相棒をアバターにしました');
     });
     $('#pin-form').addEventListener('submit', submitPin);
     $('#parent-lock').addEventListener('click', () => { parentOpen = false; renderParent(); });

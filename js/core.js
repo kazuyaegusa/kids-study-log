@@ -1,4 +1,4 @@
-export const FORMAT_VERSION = 2;
+export const FORMAT_VERSION = 3;
 export const DEFAULT_CATEGORIES = [
   { id: 'juku', name: '塾の宿題', icon: '✏️', visible: true },
   { id: 'school', name: '学校の宿題', icon: '🏫', visible: true },
@@ -17,6 +17,49 @@ export function yesterdayKey(date = new Date()) {
 
 export function monthKey(dateKey) { return dateKey.slice(0, 7); }
 
+export function weekKey(value = new Date()) {
+  if (typeof value === 'string' && !isValidDateKey(value)) throw new Error('日付が正しくありません');
+  const date = typeof value === 'string' ? new Date(`${value}T12:00:00`) : value;
+  return localDateKey(new Date(date.getFullYear(), date.getMonth(), date.getDate() - (date.getDay() + 6) % 7));
+}
+
+export function weekDays(week) {
+  if (!isValidDateKey(week) || weekKey(week) !== week) throw new Error('週の形式が正しくありません');
+  const [year, month, day] = week.split('-').map(Number);
+  return Array.from({ length: 7 }, (_, index) => localDateKey(new Date(year, month - 1, day + index)));
+}
+
+// Month keys remain supported for the saved legacy albums.
+export function periodDays(key) { return key.length === 7 ? monthDays(key) : weekDays(key); }
+
+export function periodLabel(key) {
+  if (key.length === 7) return `${Number(key.slice(0, 4))}年${Number(key.slice(5))}月`;
+  const end = weekDays(key).at(-1);
+  const startLabel = `${Number(key.slice(5, 7))}月${Number(key.slice(8))}日`;
+  const endLabel = `${key.slice(0, 4) !== end.slice(0, 4) ? `${Number(end.slice(0, 4))}年` : ''}${key.slice(0, 7) !== end.slice(0, 7) ? `${Number(end.slice(5, 7))}月` : ''}${Number(end.slice(8))}日`;
+  return `${startLabel}〜${endLabel}`;
+}
+
+// Compute the writes inside the caller's entries/replies transaction.
+export function replaceDayEntries(previous, date, proposed) {
+  if (!isValidDateKey(date) || !proposed.length || proposed.some(entry => entry.date !== date) ||
+      new Set(proposed.map(entry => entry.id)).size !== proposed.length) {
+    throw new Error('記録する項目と日付を確認してください');
+  }
+  const existing = previous.filter(entry => entry.date === date)
+    .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+  const retained = new Set();
+  const entries = proposed.map(entry => {
+    const old = existing.find(row => row.id === entry.id && row.categoryId === entry.categoryId && !retained.has(row.id)) ??
+      existing.find(row => row.categoryId === entry.categoryId && !retained.has(row.id));
+    if (!old) return entry;
+    retained.add(old.id);
+    return { ...entry, id: old.id, createdAt: old.createdAt };
+  });
+  return { entries, deletedIds: existing.filter(entry => !retained.has(entry.id)).map(entry => entry.id),
+    editing: existing.length > 0 };
+}
+
 export function daysInMonth(month) {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error('月の形式が正しくありません');
   const [year, number] = month.split('-').map(Number);
@@ -29,7 +72,7 @@ export function monthDays(month) {
 
 export function pokemonTileOrder(month, pokemonId, priority = []) {
   if (!Number.isInteger(pokemonId) || pokemonId < 1 || pokemonId > 1025) throw new Error('ポケモンIDが正しくありません');
-  const order = Array.from({ length: daysInMonth(month) }, (_, index) => index);
+  const order = Array.from({ length: periodDays(month).length }, (_, index) => index);
   let seed = 2166136261;
   for (const character of `${month}:${pokemonId}`) {
     seed ^= character.charCodeAt(0);
@@ -45,13 +88,19 @@ export function pokemonTileOrder(month, pokemonId, priority = []) {
 }
 
 export function pokemonTileDates(entries, month, pokemonId, priority = []) {
-  const dates = [...new Set(entries.map(entry => entry.date).filter(date => isValidDateKey(date) && date.startsWith(`${month}-`)))].sort();
+  const days = new Set(periodDays(month));
+  const dates = [...new Set(entries.map(entry => entry.date).filter(date => days.has(date)))].sort();
   const order = pokemonTileOrder(month, pokemonId, priority);
   return new Map(dates.map((date, index) => [order[index], date]));
 }
 
 export function summarizeMonth(entries, month) {
-  const matching = entries.filter(entry => entry.date.startsWith(`${month}-`));
+  return summarizePeriod(entries, month);
+}
+
+export function summarizePeriod(entries, period) {
+  const days = new Set(periodDays(period));
+  const matching = entries.filter(entry => days.has(entry.date));
   return {
     count: matching.length,
     minutes: matching.reduce((sum, entry) => sum + entry.minutes, 0),
@@ -108,7 +157,7 @@ export function streakInfo(entries, today) {
 
 export function completedPokemon(entries, months) {
   return months.filter(month => month.artType === 'pokemon' &&
-    summarizeMonth(entries, month.id).activeDays === daysInMonth(month.id));
+    summarizePeriod(entries, month.id).activeDays === periodDays(month.id).length);
 }
 
 export function badgeStatus(entries, months) {
@@ -142,8 +191,8 @@ const photo = value => value == null || (typeof value === 'string' && value.leng
 export function migrateBackup(input) {
   if (!plain(input)) throw new Error('バックアップの形式が正しくありません');
   if (input.formatVersion === FORMAT_VERSION) return input;
-  if (input.formatVersion === 1 && Array.isArray(input.entries)) {
-    return { ...input, formatVersion: FORMAT_VERSION, replies: input.replies ?? [], settings: input.settings ?? [] };
+  if ([1, 2].includes(input.formatVersion) && Array.isArray(input.entries)) {
+    return { ...input, formatVersion: FORMAT_VERSION, weeks: [], replies: input.replies ?? [], settings: input.settings ?? [] };
   }
   throw new Error('対応していないバックアップです');
 }
@@ -153,14 +202,18 @@ export const MAX_BACKUP_BYTES = 500_000_000;
 
 export function validateBackup(raw) {
   const data = migrateBackup(raw);
-  if (!['entries', 'months', 'categories', 'settings', 'replies'].every(key => Array.isArray(data[key]))) throw new Error('バックアップの項目が足りません');
-  if (data.entries.length > 100_000 || data.months.length > 1200 || data.categories.length > 200 || data.replies.length > 100_000 || data.settings.length > 100) throw new Error('バックアップが大きすぎます');
+  if (!['entries', 'months', 'weeks', 'categories', 'settings', 'replies'].every(key => Array.isArray(data[key]))) throw new Error('バックアップの項目が足りません');
+  if (data.entries.length > 100_000 || data.months.length > 1200 || data.weeks.length > 6000 || data.categories.length > 200 || data.replies.length > 100_000 || data.settings.length > 100) throw new Error('バックアップが大きすぎます');
   const unique = (rows, key) => new Set(rows.map(row => row[key])).size === rows.length;
   if (!data.categories.every(c => plain(c) && shortText(c.id, 80) && c.id && shortText(c.name, 80) && c.name && shortText(c.icon, 16) && typeof c.visible === 'boolean') || !unique(data.categories, 'id')) throw new Error('項目のデータが正しくありません');
   const categoryIds = new Set(data.categories.map(c => c.id));
   if (!data.entries.every(e => plain(e) && shortText(e.id, 100) && e.id && isValidDateKey(e.date) && categoryIds.has(e.categoryId) && Number.isInteger(e.minutes) && [5, 10, 15, 20, 30, 45, 60].includes(e.minutes) && typeof e.selfStarted === 'boolean' && shortText(e.comment, 500) && shortText(e.question, 300) && photo(e.photo) && Number.isFinite(e.createdAt)) || !unique(data.entries, 'id')) throw new Error('記録のデータが正しくありません');
   if (!data.months.every(m => plain(m) && /^\d{4}-(0[1-9]|1[0-2])$/.test(m.id) && ['default', 'image', 'drawing', 'pokemon'].includes(m.artType) && photo(m.artwork) && (m.artType !== 'pokemon' || (Number.isInteger(m.pokemonId) && m.pokemonId >= 1 && m.pokemonId <= 1025 && shortText(m.pokemonName, 80) && m.pokemonName.trim() && typeof m.artwork === 'string' && /^data:image\/png;base64,/i.test(m.artwork)))) || !unique(data.months, 'id')) throw new Error('月の絵のデータが正しくありません');
   const entryIds = new Set(data.entries.map(e => e.id));
+  if (!data.weeks.every(w => plain(w) && isValidDateKey(w.id) && weekKey(w.id) === w.id &&
+    w.artType === 'pokemon' && Number.isInteger(w.pokemonId) && w.pokemonId >= 1 && w.pokemonId <= 1025 &&
+    shortText(w.pokemonName, 80) && w.pokemonName.trim() && typeof w.artwork === 'string' &&
+    photo(w.artwork) && /^data:image\/png;base64,/i.test(w.artwork)) || !unique(data.weeks, 'id')) throw new Error('週の相棒のデータが正しくありません');
   if (!data.replies.every(r => plain(r) && entryIds.has(r.id) && shortText(r.stamp, 30) && shortText(r.comment, 500) && typeof r.seen === 'boolean' && Number.isFinite(r.updatedAt)) || !unique(data.replies, 'id')) throw new Error('返信のデータが正しくありません');
   if (!data.settings.every(s => plain(s) && shortText(s.key, 80) && s.key && plain(s.value)) || !unique(data.settings, 'key')) throw new Error('設定のデータが正しくありません');
   const pin = data.settings.find(s => s.key === 'pin')?.value;
@@ -170,7 +223,8 @@ export function validateBackup(raw) {
     (Object.hasOwn(adventure, 'dailyGoal') && (!Number.isInteger(adventure.dailyGoal) || adventure.dailyGoal < 5 || adventure.dailyGoal > 180)) ||
     (Object.hasOwn(adventure, 'soundEnabled') && typeof adventure.soundEnabled !== 'boolean') ||
     (Object.hasOwn(adventure, 'avatarMonth') && adventure.avatarMonth !== null &&
-      (typeof adventure.avatarMonth !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(adventure.avatarMonth)))
+      (typeof adventure.avatarMonth !== 'string' || !(/^\d{4}-(0[1-9]|1[0-2])$/.test(adventure.avatarMonth) ||
+        (isValidDateKey(adventure.avatarMonth) && weekKey(adventure.avatarMonth) === adventure.avatarMonth))))
   )) throw new Error('冒険の設定が正しくありません');
   return data;
 }

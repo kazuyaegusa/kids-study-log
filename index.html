@@ -104,10 +104,10 @@
               <div class="panel-top">
                 <div>
                   <span class="panel-kicker">
-                    MONTHLY PARTNER
+                    WEEKLY PARTNER
                   </span>
                   <h2 id="home-title">
-                    今月の相棒
+                    今週の相棒
                   </h2>
                 </div>
                 <span id="month-label" class="month-label">
@@ -115,7 +115,7 @@
               </div>
               <div id="selection-panel" hidden>
                 <p class="selection-intro">
-                  今月の相棒を選ぼう！
+                  今週の相棒を選ぼう！
                 </p>
                 <p class="selection-help">
                   6つの影から選んでね。決めたら変更できないよ。
@@ -138,7 +138,7 @@
                     ？？？
                   </span>
                   <span id="month-progress" class="progress-pill">
-                    0 / 31 マス
+                    0 / 7 マス
                   </span>
                 </div>
                 <p class="board-hint">
@@ -154,7 +154,7 @@
                 <span aria-hidden="true">
                   ✏️
                 </span>
-                <span>
+                <span id="open-record-label">
                   今日の記録をつける
                 </span>
                 <span aria-hidden="true">
@@ -251,7 +251,7 @@
                 <button class="secondary-button" type="submit">設定を保存</button>
               </form>
               <p>相棒アバターは、図鑑の完成カードから選べます。</p>
-              <button id="reset-avatar" class="secondary-button" type="button">今月の相棒をアバターにする</button>
+              <button id="reset-avatar" class="secondary-button" type="button">今週の相棒をアバターにする</button>
             </section>
             <section class="parent-block sticker">
               <h3>
@@ -385,6 +385,7 @@
                 </label>
                 <span id="photo-name">
                 </span>
+                <img id="record-photo-preview" class="entry-photo" alt="保存済みの学習写真" hidden>
               </div>
             </details>
             <p id="record-empty" role="status">項目を1つ以上選んでください。</p>

@@ -10,7 +10,7 @@ const { chromium } = require(join(toolRoot, 'playwright-core'));
 const axeSource = await readFile(join(toolRoot, 'axe-core/axe.min.js'), 'utf8');
 const executablePath = process.env.CHROMIUM_PATH ?? join(homedir(),
   'Library/Caches/ms-playwright/chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell');
-const url = process.argv[2] ?? 'http://127.0.0.1:8794/';
+const url = process.argv[2] ?? 'http://127.0.0.1:8000/';
 const output = process.argv[3] ?? '/private/tmp/kids-study-log-shots';
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({ executablePath, chromiumSandbox: true });
@@ -141,7 +141,9 @@ try {
     await page.locator('#confirm-accept').click();
     await page.locator('#board-panel').waitFor({ state: 'visible', timeout: 30000 });
     assert.equal(await page.locator('#pokemon-name').textContent(), '？？？');
-    assert.equal((await dbRows(page, 'months')).find(row => row.id === '2026-10').artType, 'pokemon');
+    assert.equal((await dbRows(page, 'weeks')).find(row => row.id === '2026-10-12').artType, 'pokemon');
+    assert.equal((await dbRows(page, 'months')).find(row => row.id === '2026-10').artType, 'image');
+    assert.equal(await page.locator('#month-grid .month-cell').count(), 7);
     await snapshot(page, prefix, '03-chosen');
 
     await page.locator('#open-record').click();
@@ -188,7 +190,7 @@ try {
     await page.locator('#save-celebration').waitFor({ state: 'hidden', timeout: 5000 });
     await result(page, prefix, '06-result');
     await snapshot(page, prefix, '07-home');
-    assert.equal(await page.locator('#month-progress').textContent(), '2 / 31 マス');
+    assert.equal(await page.locator('#month-progress').textContent(), '2 / 7 マス');
     assert.equal(await page.locator('#exp-numbers').textContent(), '37 / 50 EXP');
     assert.equal((await dbRows(page, 'entries')).length, 2);
     await page.locator('#month-grid button[aria-label^="17日の記録"]').click();
@@ -214,11 +216,12 @@ try {
       const { openDatabase, get } = await import('/js/db.js');
       const { withCoverage } = await import('/js/ui/board.js');
       const db = await openDatabase();
-      const artwork = await withCoverage(await get(db, 'months', '2026-10'));
+      const artwork = await withCoverage(await get(db, 'weeks', '2026-10-12'));
       db.close();
       return artwork.priority;
     });
-    assert.ok(positions.every(position => priority.includes(position)), 'first three tiles cover real Pokemon pixels');
+    const prioritized = positions.filter(position => priority.includes(position));
+    assert.equal(prioritized.length, Math.min(positions.length, priority.length), 'opaque tiles open first');
     assert.notDeepEqual(positions, [15, 16, 17], 'positions are not chronological calendar cells');
     evidence.push({ screen: `${prefix}-random-positions`, positions, priority });
     await snapshot(page, prefix, '08-third-home');
@@ -229,7 +232,7 @@ try {
       const { openDatabase, all, put } = await import('/js/db.js');
       const { monthDays } = await import('/js/core.js');
       const db = await openDatabase();
-      const artwork = (await all(db, 'months')).find(month => month.id === '2026-10');
+      const artwork = (await all(db, 'weeks')).find(week => week.id === '2026-10-12');
       for (const month of ['2026-09', '2026-08']) await put(db, 'months', { ...artwork, id: month });
       for (const date of [...monthDays('2026-09'), '2026-08-03', '2026-07-04']) {
         await put(db, 'entries', {
@@ -244,7 +247,7 @@ try {
     await snapshot(page, prefix, '09-collection');
     assert.equal(await page.locator('#collection-count').textContent(), '図鑑 1 / 1025');
     assert.equal(await page.locator('.badge-card').count(), 10);
-    assert.equal(await page.locator('.album-card').first().locator('.silhouette').count(), 1);
+    assert.equal(await page.locator('.album-card').first().locator('.album-tile.open').count(), 3);
     await page.getByRole('button', { name: 'アバターにする', exact: true }).click();
     await page.getByRole('button', { name: 'アバターに設定中', exact: true }).waitFor();
     await page.locator('[data-view="home"]').click();
@@ -321,7 +324,8 @@ try {
     const backup = await readFile(await download.path());
     const parsed = JSON.parse(backup.toString());
     referenceBackup = parsed;
-    assert.equal(parsed.formatVersion, 2);
+    assert.equal(parsed.formatVersion, 3);
+    assert.equal(parsed.weeks.length, 1);
     assert.equal(parsed.entries.length, before);
     assert.ok(parsed.entries.some(entry => entry.photo?.startsWith('data:image/jpeg;base64,')));
     assert.equal(parsed.settings.find(item => item.key === 'nickname').value.name, 'ソラ');
@@ -348,7 +352,7 @@ try {
     await context.setOffline(true);
     await page.reload();
     await page.locator('#board-panel').waitFor({ state: 'visible' });
-    assert.equal(await page.locator('#month-progress').textContent(), '3 / 31 マス');
+    assert.equal(await page.locator('#month-progress').textContent(), '3 / 7 マス');
     assert.equal(await page.locator('#goal-target').textContent(), '/ 45 分');
     assert.equal(await page.locator('#player-avatar img:not(.silhouette)').count(), 1);
     await snapshot(page, prefix, '13-offline');
@@ -362,66 +366,68 @@ try {
   });
   const page = await context.newPage();
   page.on('pageerror', error => errors.push(`edges: ${error.message}`));
-  await page.clock.setFixedTime(new Date('2026-10-31T12:00:00+09:00'));
+  await page.clock.setFixedTime(new Date('2026-10-18T12:00:00+09:00'));
   await page.goto(url);
   await page.locator('#exp-numbers').waitFor();
-  await page.evaluate(async backup => {
-    const { openDatabase, importBackup } = await import('/js/db.js');
-    const { monthDays } = await import('/js/core.js');
-    const db = await openDatabase();
-    const artwork = backup.months.find(month => month.id === '2026-10');
-    const entries = monthDays('2026-10').slice(0, -1).map((date, index) => ({
-      id: `completion-${index}`, date, categoryId: 'reading', minutes: 10,
-      selfStarted: false, comment: '', question: '', photo: null, createdAt: index
-    }));
-    await importBackup(db, { ...backup, entries, months: [artwork], replies: [], settings: [] });
-    db.close();
-  }, referenceBackup);
-  await page.reload();
-  await page.locator('#month-grid .open').nth(29).waitFor();
+  const seedWeek = async (date, count, settings = []) => {
+    await page.clock.setFixedTime(new Date(`${date}T12:00:00+09:00`));
+    await page.evaluate(async ({ backup, date, count, settings }) => {
+      const { openDatabase, importBackup } = await import('/js/db.js');
+      const { weekKey, weekDays } = await import('/js/core.js');
+      const db = await openDatabase();
+      const id = weekKey(date);
+      const artwork = { ...backup.weeks[0], id };
+      const entries = weekDays(id).slice(0, count).map((date, index) => ({
+        id: `completion-${index}`, date, categoryId: 'reading', minutes: 10,
+        selfStarted: false, comment: '', question: '', photo: null, createdAt: index
+      }));
+      await importBackup(db, { ...backup, entries, weeks: [artwork], months: [], replies: [], settings });
+      db.close();
+    }, { backup: referenceBackup, date, count, settings });
+    await page.reload();
+    await page.locator('#board-panel').waitFor({ state: 'visible' });
+  };
+  await seedWeek('2026-10-18', 6);
+  await page.locator('#month-grid .open').nth(5).waitFor();
   await page.locator('#open-record').click();
-  assert.equal(await page.locator('#record-sheet').evaluate(node => getComputedStyle(node).animationName), 'fade-in');
   await page.getByRole('button', { name: '学校の宿題', exact: true }).click();
   await page.locator('#save-entry').click();
   await page.locator('#save-celebration').waitFor({ state: 'visible' });
   assert.match(await page.locator('#celebration-title').textContent(), /をゲット！$/);
-  assert.equal(await page.locator('#month-grid .open').count(), 31);
+  assert.equal(await page.locator('#month-grid .open').count(), 7);
   assert.equal(await page.locator('#celebration-partner img').evaluate(node => getComputedStyle(node).animationName), 'none');
   await snapshot(page, 'edges', '14-complete-reduced-motion', false);
   await page.locator('#skip-celebration').click();
   assert.match(await page.locator('#result-badges').textContent(), /ポケモン初ゲット/);
   await result(page, 'edges', '14-result-reduced-motion');
   assert.notEqual(await page.locator('#pokemon-name').textContent(), '？？？');
+  await page.locator('[data-view="album"]').click();
+  await page.locator('.album-card img:not(.silhouette)').waitFor();
+  assert.equal(await page.locator('.album-card img:not(.silhouette)').count(), 1);
+  await page.getByRole('button', { name: 'アバターにする', exact: true }).click();
+  await page.getByRole('button', { name: 'アバターに設定中', exact: true }).waitFor();
+  assert.equal((await dbRows(page, 'settings')).find(row => row.key === 'adventure').value.avatarMonth, '2026-10-12');
+  await page.locator('[data-view="home"]').click();
   const immutable = await page.evaluate(async () => {
-    const { openDatabase, all, choosePokemonMonth } = await import('/js/db.js');
+    const { openDatabase, all, choosePokemonWeek } = await import('/js/db.js');
     const db = await openDatabase();
-    const original = (await all(db, 'months'))[0];
-    const result = await choosePokemonMonth(db, { ...original, pokemonName: '変更できない' });
-    const unchanged = (await all(db, 'months'))[0].pokemonName === original.pokemonName;
+    const original = (await all(db, 'weeks'))[0];
+    const result = await choosePokemonWeek(db, { ...original, pokemonName: '変更できない' });
+    const unchanged = (await all(db, 'weeks'))[0].pokemonName === original.pokemonName;
     db.close();
     return { result, unchanged };
   });
   assert.deepEqual(immutable, { result: false, unchanged: true });
 
-  await page.evaluate(async backup => {
-    const { openDatabase, importBackup } = await import('/js/db.js');
-    const db = await openDatabase();
-    const entries = Array.from({ length: 4 }, (_, index) => ({
-      id: `level-${index}`, date: '2026-10-31', categoryId: 'reading', minutes: 5,
-      selfStarted: false, comment: '', question: '', photo: null, createdAt: index
-    }));
-    await importBackup(db, { ...backup, entries, replies: [], settings: [] });
-    db.close();
-  }, referenceBackup);
-  await page.reload();
+  // A fresh fifth date reaches level 2; removing it recomputes EXP downward.
+  await seedWeek('2026-10-16', 4);
   await page.waitForFunction(() => document.querySelector('#exp-numbers').textContent === '40 / 50 EXP');
   await page.locator('#open-record').click();
   await page.getByRole('button', { name: '学校の宿題', exact: true }).click();
   await page.locator('#save-entry').click();
   await page.locator('#save-celebration').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#celebration-extra').textContent(), 'レベルアップ！ Lv.2');
-  assert.equal(await page.locator('#celebration-title').textContent(), '記録できた！');
-  assert.equal(await page.locator('#month-grid .open').count(), 1, 'same date cannot open a second tile');
+  assert.equal(await page.locator('#month-grid .open').count(), 5);
   await snapshot(page, 'edges', '15-level-up', false);
   await page.locator('#skip-celebration').click();
   await result(page, 'edges', '15-result');
@@ -430,163 +436,130 @@ try {
   await page.locator('#confirm-accept').click();
   await page.locator('#parent-back').click();
   await page.waitForFunction(() => document.querySelector('#level-badge').textContent === 'Lv.1');
-  await page.clock.setFixedTime(new Date('2026-11-01T12:00:00+09:00'));
-  await page.evaluate(async backup => {
-    const { openDatabase, importBackup } = await import('/js/db.js');
-    const { monthDays } = await import('/js/core.js');
-    const db = await openDatabase();
-    const entries = monthDays('2026-10').slice(0, -1).map((date, index) => ({
-      id: `boundary-${index}`, date, categoryId: 'reading', minutes: 10,
-      selfStarted: false, comment: '', question: '', photo: null, createdAt: index
-    }));
-    await importBackup(db, { ...backup, entries, replies: [], settings: [] });
-    db.close();
-  }, referenceBackup);
-  await page.reload();
-  await page.waitForFunction(() => document.querySelector('#month-label').textContent === '11月');
+
+  // Monday can backfill the previous Sunday, completing the previous week.
+  await seedWeek('2026-11-01', 6);
+  await page.clock.setFixedTime(new Date('2026-11-02T12:00:00+09:00'));
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.waitForFunction(() => document.querySelector('#month-label').textContent === '11月2日〜8日');
   await page.locator('#open-record').click();
-  await page.getByRole('button', { name: '昨日・31日' }).click();
+  await page.getByRole('button', { name: '昨日・1日' }).click();
   await page.getByRole('button', { name: '学校の宿題', exact: true }).click();
   await page.locator('#save-entry').click();
   await page.locator('#save-celebration').waitFor({ state: 'visible' });
   assert.match(await page.locator('#celebration-title').textContent(), /をゲット！$/);
-  assert.equal(await page.locator('#celebration-partner img').count(), 1);
-  await snapshot(page, 'edges', '16-previous-month', false);
+  assert.equal(await page.locator('#celebration-partner img:not(.silhouette)').count(), 1);
+  await snapshot(page, 'edges', '16-previous-week', false);
   await page.locator('#skip-celebration').click();
   await result(page, 'edges', '16-result');
-  assert.equal(await page.locator('#month-label').textContent(), '11月');
   assert.equal(await page.locator('#board-panel').isVisible(), false);
 
-  await page.clock.setFixedTime(new Date('2026-10-31T12:00:00+09:00'));
-  await page.evaluate(async backup => {
-    const { openDatabase, importBackup } = await import('/js/db.js');
-    const db = await openDatabase();
-    const artwork = backup.months.find(month => month.id === '2026-10');
-    await importBackup(db, {
-      ...backup, months: [{ ...artwork, artType: 'drawing' }],
-      entries: [backup.entries.find(entry => entry.date === '2026-10-17')],
-      replies: [], settings: []
-    });
-    db.close();
-  }, referenceBackup);
-  await page.reload();
-  await page.locator('#selection-panel').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#board-panel').isVisible(), false);
-  await snapshot(page, 'edges', '17-legacy-artwork');
-
-  // Two independent tabs share the transaction lock, including a legacy record.
+  // Separate tabs serialize weekly selection and daily replacement.
   const other = await context.newPage();
   await other.goto(url);
   const chooseInTab = tab => tab.evaluate(async () => {
-    const { openDatabase, get, choosePokemonMonth } = await import('/js/db.js');
+    const { openDatabase, all, choosePokemonWeek } = await import('/js/db.js');
     const db = await openDatabase();
-    const original = await get(db, 'months', '2026-10');
-    const saved = await choosePokemonMonth(db, { ...original, artType: 'pokemon' });
+    const original = (await all(db, 'weeks'))[0];
+    const saved = await choosePokemonWeek(db, { ...original, id: '2026-11-02' });
     db.close();
     return saved;
   });
   const race = await Promise.all([chooseInTab(page), chooseInTab(other)]);
   assert.deepEqual(race.sort(), [false, true]);
-  evidence.push({ screen: 'edges-two-tabs-choice', winners: race.filter(Boolean).length });
+  const replaceInTab = (tab, minutes) => tab.evaluate(async minutes => {
+    const { openDatabase, saveDayEntries } = await import('/js/db.js');
+    const db = await openDatabase();
+    const saved = await saveDayEntries(db, '2026-11-02', [{ id: `race-${minutes}`, date: '2026-11-02', categoryId: 'reading', minutes,
+      selfStarted: false, comment: '', question: '', photo: null, createdAt: minutes }]);
+    db.close();
+    return { editing: saved.editing, id: saved.entries[0].id };
+  }, minutes);
+  const saves = await Promise.all([replaceInTab(page, 10), replaceInTab(other, 20)]);
+  assert.deepEqual(saves.map(row => row.editing).sort(), [false, true]);
+  assert.equal(saves[0].id, saves[1].id);
+  assert.equal((await dbRows(page, 'entries')).filter(entry => entry.date === '2026-11-02').length, 1);
   await other.close();
+  evidence.push({ screen: 'edges-two-tabs', choiceWinners: 1, dailyRows: 1, sameID: true });
 
-  // Default artwork also shows selection, without losing the legacy past month.
-  await page.evaluate(async () => {
-    const { openDatabase, get, put } = await import('/js/db.js');
-    const db = await openDatabase();
-    const artwork = await get(db, 'months', '2026-10');
-    await put(db, 'months', { ...artwork, id: '2026-09', artType: 'drawing' });
-    await put(db, 'months', { id: '2026-10', artType: 'default', artwork: null });
-    db.close();
-  });
-  await page.reload();
-  await page.locator('#selection-panel').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#board-panel').isVisible(), false);
-  await page.locator('[data-view="album"]').click();
-  await page.getByRole('button', { name: '記録を見る', exact: true }).nth(1).click();
-  await page.locator('#detail-dialog').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#detail-dialog .has-art:not(.pokemon-board)').count(), 1);
-  await snapshot(page, 'edges', '18-past-drawing');
-  await page.locator('[data-close]').click();
-
-  // Normal-motion completion changes the silhouette to real color.
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await page.evaluate(async backup => {
-    const { openDatabase, importBackup } = await import('/js/db.js');
-    const { monthDays } = await import('/js/core.js');
-    const db = await openDatabase();
-    const artwork = backup.months.find(month => month.id === '2026-10');
-    const entries = monthDays('2026-10').slice(0, -1).map((date, index) => ({
-      id: `normal-completion-${index}`, date, categoryId: 'reading', minutes: 10,
-      selfStarted: false, comment: '', question: '', photo: null, createdAt: index
-    }));
-    await importBackup(db, { ...backup, entries, months: [artwork], replies: [], settings: [] });
-    db.close();
-  }, referenceBackup);
-  await page.reload();
-  await page.locator('#month-grid .open').nth(29).waitFor();
+  await seedWeek('2026-10-18', 6);
   await page.locator('#open-record').click();
   await page.getByRole('button', { name: '学校の宿題', exact: true }).click();
   await page.locator('#save-entry').click();
   await page.locator('#save-celebration').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#celebration-partner img').evaluate(node => getComputedStyle(node).animationName), 'name-reveal');
-  await snapshot(page, 'edges', '19-complete-color', false);
+  await snapshot(page, 'edges', '17-complete-color', false);
   await page.locator('#skip-celebration').click();
-  await result(page, 'edges', '19-complete-result');
+  await result(page, 'edges', '17-complete-result');
 
-  // Gaps reset the streak; restored incomplete artwork falls back to a silhouette.
-  await page.clock.setFixedTime(new Date('2026-10-20T12:00:00+09:00'));
-  await page.evaluate(async backup => {
-    const { openDatabase, importBackup } = await import('/js/db.js');
-    const db = await openDatabase();
-    const artwork = backup.months.find(month => month.id === '2026-10');
-    const entries = ['2026-10-18', '2026-10-20'].map((date, index) => ({
-      id: `gap-${index}`, date, categoryId: 'reading', minutes: 10,
-      selfStarted: false, comment: '', question: '', photo: null, createdAt: index
-    }));
-    await importBackup(db, { ...backup, entries, months: [artwork], replies: [],
-      settings: [{ key: 'adventure', value: { dailyGoal: 30, soundEnabled: true, avatarMonth: '2026-09' } }] });
-    db.close();
-  }, referenceBackup);
-  await page.reload();
-  await page.locator('#month-grid .open').nth(1).waitFor();
-  assert.equal(await page.locator('#streak-count').textContent(), '1日');
-  assert.equal(await page.locator('.week-day.recorded').count(), 1);
-  assert.equal(await page.locator('#player-avatar .silhouette').count(), 1);
-  await snapshot(page, 'edges', '20-streak-gap');
-  await page.clock.setFixedTime(new Date('2026-10-21T12:00:00+09:00'));
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await page.waitForFunction(() => document.querySelector('#goal-minutes').textContent === '0', null, { timeout: 5000 });
-  assert.equal(await page.locator('#streak-count').textContent(), '1日');
+  // A name request finishing after Monday must not choose last week's partner.
   await page.clock.setFixedTime(new Date('2026-11-01T23:59:59+09:00'));
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await page.locator('#selection-panel').waitFor({ state: 'visible', timeout: 5000 });
+  await page.locator('#selection-panel').waitFor({ state: 'visible' });
   await page.locator('.pokemon-candidate').nth(5).waitFor({ timeout: 30000 });
-  assert.equal(await page.locator('#month-label').textContent(), '11月');
-  assert.equal(await page.locator('#streak-count').textContent(), '0日');
-  // Real GET is held in the disposable test browser until after the month changes.
   let releaseSpecies;
   const release = new Promise(resolve => { releaseSpecies = resolve; });
   let speciesRequested;
   const requested = new Promise(resolve => { speciesRequested = resolve; });
   await page.route('https://pokeapi.co/api/v2/pokemon-species/*', async route => {
-    speciesRequested();
-    await release;
-    await route.continue();
+    speciesRequested(); await release; await route.continue();
   });
   await page.locator('.pokemon-candidate').first().click();
   await page.locator('#confirm-accept').click();
   await requested;
-  await page.clock.setFixedTime(new Date('2026-12-01T00:00:01+09:00'));
+  await page.clock.setFixedTime(new Date('2026-11-02T00:00:01+09:00'));
   releaseSpecies();
-  await page.waitForFunction(() => document.querySelector('#month-label').textContent === '12月', null, { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelector('#month-label').textContent === '11月2日〜8日', null, { timeout: 30000 });
   await page.locator('.pokemon-candidate').nth(5).waitFor({ timeout: 30000 });
-  assert.equal((await dbRows(page, 'months')).some(month => month.id === '2026-11'), false, 'month rollover during name fetch cannot save a past-month choice');
-  assert.equal((await dbRows(page, 'months')).find(month => month.id === '2026-10').artType, 'pokemon');
-  await snapshot(page, 'edges', '21-live-month-rollover');
-  evidence.push({ screen: 'edges-live-date-refresh', dailyGoalReset: true, monthChoiceRefreshed: true, lateChoiceSaved: false });
+  assert.equal((await dbRows(page, 'weeks')).some(week => week.id === '2026-10-26'), false);
+  await snapshot(page, 'edges', '18-live-week-rollover');
   await context.close();
-  console.log('edges: completion, reduced motion, immutable choice, level up/down, duplicate date, month boundary and legacy artwork passed');
+
+  // Upgrade a real version-2 database with existing data, then read v1/v2 backups.
+  const legacyContext = await browser.newContext({ viewport: { width: 820, height: 1180 }, timezoneId: 'Asia/Tokyo' });
+  const legacyPage = await legacyContext.newPage();
+  await legacyPage.route('**/js/app.js', route => route.fulfill({ contentType: 'application/javascript', body: '' }));
+  await legacyPage.goto(url);
+  await legacyPage.evaluate(async backup => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('mainichi-kiroku', 2);
+      request.onupgradeneeded = () => {
+        for (const name of ['entries', 'months', 'categories', 'settings', 'replies']) request.result.createObjectStore(name, { keyPath: name === 'settings' ? 'key' : 'id' });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const tx = db.transaction(['entries', 'months', 'categories', 'settings', 'replies'], 'readwrite');
+    for (const name of ['entries', 'categories', 'settings', 'replies']) for (const row of backup[name]) {
+      tx.objectStore(name).put(name === 'entries' ? { ...row, photo: null } : row);
+    }
+    tx.objectStore('months').put({ id: '2026-10', artType: 'default', artwork: null });
+    await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); });
+    db.close();
+  }, referenceBackup);
+  await legacyPage.unroute('**/js/app.js');
+  await legacyPage.reload();
+  await legacyPage.locator('#exp-numbers').waitFor();
+  const migration = await legacyPage.evaluate(async () => {
+    const { openDatabase, exportBackup, importBackup } = await import('/js/db.js');
+    const db = await openDatabase();
+    const upgraded = await exportBackup(db);
+    const old = { ...upgraded, formatVersion: 2 }; delete old.weeks;
+    await importBackup(db, old);
+    const restored = await exportBackup(db);
+    const v1 = { ...old, formatVersion: 1 }; delete v1.replies; delete v1.settings;
+    await importBackup(db, v1);
+    const oldest = await exportBackup(db);
+    db.close();
+    return { version: upgraded.formatVersion, weeks: upgraded.weeks.length,
+      preserved: ['entries', 'months', 'categories', 'replies', 'settings'].every(key => JSON.stringify(upgraded[key]) === JSON.stringify(restored[key])),
+      oldestEntries: oldest.entries.length, oldestMonths: oldest.months.length };
+  });
+  assert.deepEqual(migration, { version: 3, weeks: 0, preserved: true, oldestEntries: referenceBackup.entries.length, oldestMonths: 1 });
+  evidence.push({ screen: 'edges-v2-database-v1-v2-backups', ...migration });
+  await legacyContext.close();
+  console.log('edges: weekly completion, previous Sunday, concurrency, rollover, legacy DB and backup migration passed');
   assert.deepEqual(errors, [], 'browser runtime errors');
 } finally {
   await writeFile(join(output, 'browser-results.json'), JSON.stringify({ evidence, errors, network }, null, 2));

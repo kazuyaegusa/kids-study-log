@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { localDateKey, yesterdayKey, daysInMonth, monthDays, summarizeMonth, isValidDateKey, pokemonTileOrder, pokemonTileDates, migrateBackup, validateBackup, entryExp, totalExp, levelInfo } from '../js/core.js';
 import { tileGeometry } from '../js/ui/board.js';
-import { streakInfo, badgeStatus, completedPokemon } from '../js/core.js';
+import { streakInfo, badgeStatus, completedPokemon, weekKey, weekDays, periodLabel, summarizePeriod, replaceDayEntries } from '../js/core.js';
 
 const recorded = dates => dates.map(date => ({ date }));
 test('streak counts unique dates, ignores future entries and waits for today', () => {
@@ -192,7 +192,8 @@ test('pokemon tile order is a stable permutation keyed by month and ID', () => {
 });
 
 const fixture = () => ({
-  formatVersion: 2,
+  formatVersion: 3,
+  weeks: [],
   entries: [{ id: 'e1', date: '2026-10-17', categoryId: 'reading', minutes: 15, selfStarted: true, comment: 'たのしい', question: 'なぜ？', photo: null, createdAt: 123 }],
   months: [{ id: '2026-10', artType: 'image', artwork: 'data:image/jpeg;base64,AA==' }],
   categories: [{ id: 'reading', name: '読書', icon: '📚', visible: true }],
@@ -232,13 +233,13 @@ test('backup rejects duplicate IDs, invalid dates and orphan replies', () => {
   assert.throws(() => validateBackup(data), /返信/);
 });
 
-test('version 1 backup migrates to version 2 and unknown version stops', () => {
+test('version 1 backup migrates to version 3 and unknown version stops', () => {
   const old = fixture(); old.formatVersion = 1; delete old.replies; delete old.settings;
   const migrated = migrateBackup(old);
-  assert.equal(migrated.formatVersion, 2);
+  assert.equal(migrated.formatVersion, 3);
   assert.deepEqual(migrated.replies, []);
   assert.deepEqual(migrated.settings, []);
-  assert.equal(validateBackup(old).formatVersion, 2);
+  assert.equal(validateBackup(old).formatVersion, 3);
   assert.throws(() => migrateBackup({ formatVersion: 99 }), /対応していない/);
 });
 
@@ -266,4 +267,122 @@ test('saved dates keep the seeded opening order', () => {
     [order[0], '2026-10-16'],
     [order[1], '2026-10-17']
   ]);
+});
+
+
+test('local Monday week keys cross Sunday, month and year boundaries', () => {
+  for (const [date, expected] of [
+    ['2026-10-11', '2026-10-05'], ['2026-10-12', '2026-10-12'],
+    ['2026-11-01', '2026-10-26'], ['2026-11-02', '2026-11-02'],
+    ['2027-01-01', '2026-12-28'], ['2027-01-03', '2026-12-28'],
+    ['2027-01-04', '2027-01-04']
+  ]) assert.equal(weekKey(date), expected);
+  assert.equal(weekKey(new Date(2026, 9, 12, 0, 0, 1)), '2026-10-12');
+  assert.equal(weekKey(new Date(2026, 9, 11, 23, 59, 59)), '2026-10-05');
+  assert.deepEqual(weekDays('2026-12-28'), ['2026-12-28', '2026-12-29', '2026-12-30', '2026-12-31', '2027-01-01', '2027-01-02', '2027-01-03']);
+  assert.equal(periodLabel('2026-10-12'), '10月12日〜18日');
+  assert.equal(periodLabel('2026-10-26'), '10月26日〜11月1日');
+  assert.equal(periodLabel('2026-12-28'), '12月28日〜2027年1月3日');
+  assert.throws(() => weekDays('2026-10-13'));
+  assert.throws(() => weekKey('2026-02-30'));
+});
+
+test('weekly tiles use a seeded seven-position permutation and coverage priority', () => {
+  const key = '2026-10-26';
+  const order = pokemonTileOrder(key, 25, [2, 3, 4]);
+  assert.deepEqual(order, pokemonTileOrder(key, 25, [2, 3, 4]));
+  assert.deepEqual([...order].sort(), [0, 1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(order.slice(0, 3).sort(), [2, 3, 4]);
+  assert.notDeepEqual(order, pokemonTileOrder('2026-11-02', 25, [2, 3, 4]));
+  const dates = weekDays(key);
+  for (let count = 1; count <= 7; count++) {
+    const entries = recorded([...dates.slice(0, count), dates[0], '2026-10-25', '2026-11-02']);
+    const opened = pokemonTileDates(entries, key, 25, [2, 3, 4]);
+    assert.deepEqual([...opened.keys()], order.slice(0, count));
+    assert.deepEqual([...opened.values()], dates.slice(0, count));
+    assert.equal(completedPokemon(entries, [{ id: key, artType: 'pokemon' }]).length, count === 7 ? 1 : 0);
+  }
+  assert.equal(summarizePeriod(recorded(dates), key).activeDays, 7);
+});
+
+test('seven tiles cover all of a three-row image without gaps or overlaps', () => {
+  const occupied = new Set();
+  for (let index = 0; index < 7; index++) {
+    const { rows, columns, row, column, span } = tileGeometry(index, 7);
+    assert.equal(rows, 3);
+    assert.equal(columns, 6);
+    for (let x = column; x < column + span; x++) {
+      const key = `${row}:${x}`;
+      assert.equal(occupied.has(key), false);
+      occupied.add(key);
+    }
+  }
+  assert.equal(occupied.size, 18);
+});
+
+test('daily replacement retains IDs, removes omitted rows and never adds a second daily record', () => {
+  const base = fixture().entries[0];
+  const old = [base, { ...base, id: 'school', categoryId: 'school' },
+    { ...base, id: 'yesterday', date: '2026-10-16' }];
+  const proposed = [{ ...base, id: 'new-reading', minutes: 30, createdAt: 999 },
+    { ...base, id: 'research', categoryId: 'research' }];
+  const result = replaceDayEntries(old, base.date, proposed);
+  assert.equal(result.editing, true);
+  assert.deepEqual(result.deletedIds, ['school']);
+  assert.equal(result.entries[0].id, base.id);
+  assert.equal(result.entries[0].createdAt, base.createdAt);
+  assert.equal(result.entries[0].minutes, 30);
+  assert.equal(result.entries[0].question, base.question);
+  const next = [old[2], ...result.entries];
+  const repeated = replaceDayEntries(next, base.date, proposed);
+  assert.deepEqual(repeated.entries, result.entries);
+  assert.deepEqual(repeated.deletedIds, []);
+  assert.equal(totalExp(repeated.entries), totalExp(result.entries));
+  assert.equal(streakInfo(next, base.date).current, 2);
+  assert.throws(() => replaceDayEntries(old, base.date, []));
+  assert.throws(() => replaceDayEntries(old, base.date, [proposed[0], proposed[0]]));
+  assert.throws(() => replaceDayEntries(old, '2026-10-16', proposed));
+  assert.equal(replaceDayEntries([], base.date, proposed).editing, false);
+});
+
+test('omitting a legacy duplicate removes only that entry', () => {
+  const base = fixture().entries[0];
+  const result = replaceDayEntries([{ ...base, id: 'later', createdAt: 999 }, base], base.date, [{ ...base, id: 'new' }]);
+  assert.equal(result.entries[0].id, 'e1');
+  assert.deepEqual(result.deletedIds, ['later']);
+});
+
+test('weekly backups round trip and v2 backups preserve monthly data', () => {
+  const data = fixture();
+  data.weeks = [{ id: '2026-10-12', artType: 'pokemon', pokemonId: 25, pokemonName: 'ピカチュウ', artwork: 'data:image/png;base64,AA==' }];
+  data.settings.push({ key: 'adventure', value: { avatarMonth: '2026-10-12' } });
+  assert.deepEqual(validateBackup(JSON.parse(JSON.stringify(data))), data);
+  for (const patch of [{ id: '2026-10-13' }, { id: '2026-02-30' }, { pokemonId: 0 }, { pokemonName: '' }, { artwork: null }, { artwork: 'data:image/jpeg;base64,AA==' }]) {
+    const invalid = structuredClone(data);
+    Object.assign(invalid.weeks[0], patch);
+    assert.throws(() => validateBackup(invalid), /週の相棒/);
+  }
+  const duplicate = structuredClone(data);
+  duplicate.weeks.push(duplicate.weeks[0]);
+  assert.throws(() => validateBackup(duplicate), /週の相棒/);
+  const old = fixture(); old.formatVersion = 2; delete old.weeks;
+  const migrated = validateBackup(old);
+  assert.equal(migrated.formatVersion, 3);
+  assert.deepEqual(migrated.weeks, []);
+  for (const key of ['entries', 'months', 'categories', 'replies', 'settings']) assert.deepEqual(migrated[key], old[key]);
+});
+
+
+test('legacy rows keep separate IDs, notes and photos even for the same category', () => {
+  const first = fixture().entries[0];
+  const second = { ...first, id: 'e2', comment: '別の一言', question: '別の疑問', photo: 'photo-2', createdAt: 456 };
+  const third = { ...first, id: 'e3', categoryId: 'school', comment: '学校の一言', photo: 'photo-3' };
+  const existing = [first, second, third];
+  const unchanged = replaceDayEntries(existing, first.date, [second, third, first]);
+  assert.deepEqual(unchanged.entries, [second, third, first]);
+  assert.deepEqual(unchanged.deletedIds, []);
+  const removed = replaceDayEntries(existing, first.date, [{ ...second, minutes: 30 }, third]);
+  assert.deepEqual(removed.deletedIds, [first.id]);
+  assert.equal(removed.entries[0].id, second.id);
+  assert.equal(removed.entries[0].photo, second.photo);
 });
