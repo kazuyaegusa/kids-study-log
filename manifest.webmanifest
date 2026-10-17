@@ -1,0 +1,14 @@
+{
+  "name": "冒険ノート",
+  "short_name": "冒険ノート",
+  "description": "毎日の学びで相棒のマスを開く冒険ノート",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#17164f",
+  "theme_color": "#242073",
+  "icons": [
+    { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
